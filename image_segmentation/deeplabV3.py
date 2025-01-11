@@ -1,7 +1,7 @@
 """
-DeepLabV3 Instance Segmentation Training Pipeline
+DeepLabV3 Semantic Segmentation Training Pipeline
 
-This script provides functionality for training a DeepLabV3 model for instance segmentation
+This script provides functionality for training a DeepLabV3 model for semantic segmentation
 tasks using polygon annotations. It supports multiple classes and handles data preparation,
 training, and inference.
 
@@ -258,7 +258,7 @@ def inference(
     return polygons
 
 def main():
-    parser = argparse.ArgumentParser(description="Train DeepLabV3 model for instance segmentation")
+    parser = argparse.ArgumentParser(description="Train DeepLabV3 model for semantic segmentation")
     parser.add_argument('--train_csv_path', type=str, required=True,
                       help="Path to training CSV file with image_path and label columns")
     parser.add_argument('--val_csv_path', type=str, required=True,
