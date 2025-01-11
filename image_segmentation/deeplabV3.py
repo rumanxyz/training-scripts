@@ -10,14 +10,11 @@ Required Data Format:
         - image_path: Path to the image file
         - label: Path to the JSON annotation file
 
-    - JSON annotation format:
-    {
-        "image_name": "image1.jpg",
-        "polygons": [
-            {"points": [[x1, y1], [x2, y2], ...], "class": 1},
-            {"points": [[x3, y3], [x4, y4], ...], "class": 2}
-        ]
-    }
+    - JSON file annotation format:
+    [
+        {"points": [[x1, y1], [x2, y2], ...], "class": 1},
+        {"points": [[x3, y3], [x4, y4], ...], "class": 2}
+    ]
     Note: Class IDs should be from 1 to num_classes. Class 0 is reserved for background.
 """
 
@@ -114,8 +111,7 @@ class CustomSegmentationDataset(Dataset):
         # Load annotations
         label_path = self.image_annotations[idx]
         with open(label_path, 'r') as f:
-            annotation_data = json.load(f)
-            polygons = annotation_data['polygons']
+            polygons = json.load(f)
 
         # Create segmentation mask
         mask = create_segmentation_mask(image.size[::-1], polygons)
