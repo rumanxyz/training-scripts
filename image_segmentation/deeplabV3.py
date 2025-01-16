@@ -71,25 +71,30 @@ def load_pretrained_deeplabv3(num_classes: int, model_variant: str = "mobilenet_
         
     return model
 
-
 class DiceLoss(nn.Module):
     """
-    Dice Loss for handling class imbalance in segmentation.
-    Especially useful for binary segmentation (one object class).
+    Dice Loss for semantic segmentation
     """
     def __init__(self, smooth=1.0):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
         
     def forward(self, predictions, targets):
-        # Flatten predictions and targets
-        predictions = predictions.view(-1)
-        targets = targets.view(-1)
+        # predictions shape: (B, H, W)
+        # targets shape: (B, H, W)
         
-        intersection = (predictions * targets).sum()
-        dice = (2. * intersection + self.smooth) / (predictions.sum() + targets.sum() + self.smooth)
+        # Flatten the tensors while keeping batch dimension
+        predictions = predictions.reshape(predictions.shape[0], -1)  # (B, H*W)
+        targets = targets.reshape(targets.shape[0], -1)  # (B, H*W)
         
-        return 1 - dice
+        # Compute Dice score for each sample in batch
+        intersection = (predictions * targets).sum(dim=1)
+        union = predictions.sum(dim=1) + targets.sum(dim=1)
+        
+        dice = (2. * intersection + self.smooth) / (union + self.smooth)
+        
+        # Return mean Dice loss across batch
+        return 1 - dice.mean()
 
 class CombinedLoss(nn.Module):
     """
@@ -103,17 +108,24 @@ class CombinedLoss(nn.Module):
         self.num_classes = num_classes
         
     def forward(self, outputs, targets):
+        # outputs shape: (B, C, H, W)
+        # targets shape: (B, H, W)
+        
         # Cross Entropy Loss
         ce_loss = self.ce_loss(outputs, targets)
         
         # Dice Loss - compute for each class
+        predictions = torch.softmax(outputs, dim=1)  # (B, C, H, W)
         dice_loss = 0
-        predictions = torch.softmax(outputs, dim=1)
         
-        for cls in range(1, self.num_classes):  # Skip background
-            dice_loss += self.dice_loss(predictions[:, cls], (targets == cls).float())
+        # Skip background class (index 0)
+        for cls in range(1, self.num_classes):
+            class_pred = predictions[:, cls]  # (B, H, W)
+            class_target = (targets == cls).float()  # (B, H, W)
+            dice_loss += self.dice_loss(class_pred, class_target)
         
-        dice_loss = dice_loss / (self.num_classes - 1)  # Average over classes
+        # Average Dice loss over classes
+        dice_loss = dice_loss / (self.num_classes - 1)
         
         # Combine losses
         return ce_loss * (1 - self.dice_weight) + dice_loss * self.dice_weight
