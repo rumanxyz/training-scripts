@@ -150,6 +150,24 @@ def create_segmentation_mask(image_shape: Tuple[int, int], polygons: List[Dict])
         cv2.fillPoly(mask, [points], color=class_id)
     return mask
 
+
+def calculate_metrics(predictions, targets):
+    predictions = predictions.argmax(1)
+    correct = (predictions == targets).float()
+    accuracy = correct.mean()
+    
+    # Calculate per-class IoU
+    ious = []
+    for cls in range(predictions.shape[1]):
+        pred_cls = predictions == cls
+        target_cls = targets == cls
+        intersection = (pred_cls & target_cls).float().sum()
+        union = (pred_cls | target_cls).float().sum()
+        iou = (intersection + 1e-6) / (union + 1e-6)
+        ious.append(iou)
+    
+    return accuracy, torch.tensor(ious).mean()
+
 class CustomSegmentationDataset(Dataset):
     """
     Custom dataset for semantic segmentation with polygon annotations.
@@ -239,6 +257,7 @@ def train_model(
     for epoch in range(num_epochs):
         # Training phase
         model.train()
+        train_metrics = {'loss': 0, 'accuracy': 0, 'iou': 0}
         running_loss = 0.0
         # for images, masks in train_loader:
         for batch_idx, (images, masks) in enumerate(train_loader):
@@ -257,6 +276,13 @@ def train_model(
                     print(f"Masks - Unique classes: {torch.unique(masks)}")
 
             loss = criterion(outputs, masks)
+
+            # Calculate metrics
+            accuracy, iou = calculate_metrics(outputs, masks)
+            train_metrics['loss'] += loss.item()
+            train_metrics['accuracy'] += accuracy.item()
+            train_metrics['iou'] += iou.item()
+            
             loss.backward()
 
             # Gradient clipping
