@@ -228,7 +228,8 @@ def train_model(
         # Training phase
         model.train()
         running_loss = 0.0
-        for images, masks in train_loader:
+        # for images, masks in train_loader:
+        for batch_idx, (images, masks) in enumerate(train_loader):
             images = images.to(device)
             masks = masks.to(device)
 
