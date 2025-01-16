@@ -282,7 +282,7 @@ def train_model(
             train_metrics['loss'] += loss.item()
             train_metrics['accuracy'] += accuracy.item()
             train_metrics['iou'] += iou.item()
-            
+
             loss.backward()
 
             # Gradient clipping
@@ -292,6 +292,9 @@ def train_model(
             running_loss += loss.item()
 
         train_loss = running_loss / len(train_loader)
+        # Normalize metrics
+        for k in train_metrics:
+            train_metrics[k] /= len(train_loader)
 
         # Validation phase
         model.eval()
@@ -316,6 +319,7 @@ def train_model(
 
         print(f"Epoch {epoch+1}/{num_epochs}")
         print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        print(f"train_metrics : {train_metrics}")
         print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
 
         # Save checkpoints
