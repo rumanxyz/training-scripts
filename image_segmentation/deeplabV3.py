@@ -143,9 +143,10 @@ def create_segmentation_mask(image_shape: Tuple[int, int], polygons: List[Dict])
     Returns:
         numpy.ndarray: Segmentation mask where pixel values represent class IDs (0 for background)
     """
+    imgh, imgw = image_shape
     mask = np.zeros(image_shape, dtype=np.uint8)
     for polygon in polygons:
-        points = np.array(polygon['points'], dtype=np.int32)
+        points = np.array([[int(cord[0]*imgw), int(cord[1]*imgh)] for cord in polygon["points"]], dtype=np.int32)
         class_id = polygon['class']
         cv2.fillPoly(mask, [points], color=class_id)
     return mask
