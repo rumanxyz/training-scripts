@@ -323,12 +323,6 @@ def train_model(
         print(f"train_metrics : {train_metrics}")
         print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
 
-        # Save checkpoints
-        if val_loss < best_loss:
-            best_loss = val_loss
-            torch.save(model.state_dict(), best_model_path)
-            print(f"Saved best model at epoch {epoch+1}")
-
         # Save best model
         if val_loss < best_loss:
             best_loss = val_loss
