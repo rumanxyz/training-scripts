@@ -35,29 +35,101 @@ from typing import List, Dict, Tuple, Optional, Union
 
 def load_pretrained_deeplabv3(num_classes: int, model_variant: str = "mobilenet_v3_large") -> nn.Module:
     """
-    Load a pre-trained DeepLabV3 model and adjust the classifier for the given number of classes.
-
+    Load a pre-trained DeepLabV3 model with proper initialization for semantic segmentation.
+    
     Args:
-        num_classes: Number of classes, including background. For example, if the segmentation
-                    involves "dog" and "cat", use 3 (0 for background, 1 for dog, 2 for cat).
-        model_variant: The variant of DeepLabV3 model to load. Options: "mobilenet_v3_large" or "resnet101"
-
+        num_classes: For binary segmentation (one object), use 2 (background=0, object=1)
+                    For multi-class, use (N+1) where N is number of objects
+        model_variant: Model backbone variant
+    
     Returns:
-        Pretrained DeepLabV3 model adjusted for the specified number of classes.
-
-    Raises:
-        ValueError: If an unsupported model_variant is specified.
+        Properly initialized DeepLabV3 model
     """
+    # Load with weights=default instead of pretrained=True for newer torchvision
     if model_variant == "mobilenet_v3_large":
-        model = models.segmentation.deeplabv3_mobilenet_v3_large(pretrained=True)
+        model = models.segmentation.deeplabv3_mobilenet_v3_large(weights="COCO_WITH_VOC_LABELS_V1")
     elif model_variant == "resnet101":
-        model = models.segmentation.deeplabv3_resnet101(pretrained=True)
+        model = models.segmentation.deeplabv3_resnet101(weights="COCO_WITH_VOC_LABELS_V1")
     else:
         raise ValueError(f"Unsupported model_variant: {model_variant}")
-
-    # Adjust the classifier for the specified number of classes
-    model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
+    
+    # Get number of input channels in classifier's last layer
+    in_channels = model.classifier[-1].in_channels
+    
+    # Replace the classifier's last layer with proper initialization
+    model.classifier[-1] = nn.Conv2d(
+        in_channels=in_channels,
+        out_channels=num_classes,
+        kernel_size=1,
+        bias=True
+    )
+    
+    # Initialize the new layer with better weights
+    nn.init.xavier_uniform_(model.classifier[-1].weight)
+    if model.classifier[-1].bias is not None:
+        nn.init.constant_(model.classifier[-1].bias, 0)
+        
     return model
+
+class DiceLoss(nn.Module):
+    """
+    Dice Loss for semantic segmentation
+    """
+    def __init__(self, smooth=1.0):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+        
+    def forward(self, predictions, targets):
+        # predictions shape: (B, H, W)
+        # targets shape: (B, H, W)
+        
+        # Flatten the tensors while keeping batch dimension
+        predictions = predictions.reshape(predictions.shape[0], -1)  # (B, H*W)
+        targets = targets.reshape(targets.shape[0], -1)  # (B, H*W)
+        
+        # Compute Dice score for each sample in batch
+        intersection = (predictions * targets).sum(dim=1)
+        union = predictions.sum(dim=1) + targets.sum(dim=1)
+        
+        dice = (2. * intersection + self.smooth) / (union + self.smooth)
+        
+        # Return mean Dice loss across batch
+        return 1 - dice.mean()
+
+class CombinedLoss(nn.Module):
+    """
+    Combines Cross Entropy and Dice Loss for better segmentation results.
+    """
+    def __init__(self, num_classes, dice_weight=0.5):
+        super(CombinedLoss, self).__init__()
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.dice_loss = DiceLoss()
+        self.dice_weight = dice_weight
+        self.num_classes = num_classes
+        
+    def forward(self, outputs, targets):
+        # outputs shape: (B, C, H, W)
+        # targets shape: (B, H, W)
+        
+        # Cross Entropy Loss
+        ce_loss = self.ce_loss(outputs, targets)
+        
+        # Dice Loss - compute for each class
+        predictions = torch.softmax(outputs, dim=1)  # (B, C, H, W)
+        dice_loss = 0
+        
+        # Skip background class (index 0)
+        for cls in range(1, self.num_classes):
+            class_pred = predictions[:, cls]  # (B, H, W)
+            class_target = (targets == cls).float()  # (B, H, W)
+            dice_loss += self.dice_loss(class_pred, class_target)
+        
+        # Average Dice loss over classes
+        dice_loss = dice_loss / (self.num_classes - 1)
+        
+        # Combine losses
+        return ce_loss * (1 - self.dice_weight) + dice_loss * self.dice_weight
+
 
 def create_segmentation_mask(image_shape: Tuple[int, int], polygons: List[Dict]) -> np.ndarray:
     """
@@ -71,12 +143,31 @@ def create_segmentation_mask(image_shape: Tuple[int, int], polygons: List[Dict])
     Returns:
         numpy.ndarray: Segmentation mask where pixel values represent class IDs (0 for background)
     """
+    imgh, imgw = image_shape
     mask = np.zeros(image_shape, dtype=np.uint8)
     for polygon in polygons:
-        points = np.array(polygon['points'], dtype=np.int32)
+        points = np.array([[int(cord[0]*imgw), int(cord[1]*imgh)] for cord in polygon["points"]], dtype=np.int32)
         class_id = polygon['class']
         cv2.fillPoly(mask, [points], color=class_id)
     return mask
+
+
+def calculate_metrics(predictions, targets):
+    predictions = predictions.argmax(1)
+    correct = (predictions == targets).float()
+    accuracy = correct.mean()
+    
+    # Calculate per-class IoU
+    ious = []
+    for cls in range(predictions.shape[1]):
+        pred_cls = predictions == cls
+        target_cls = targets == cls
+        intersection = (pred_cls & target_cls).float().sum()
+        union = (pred_cls | target_cls).float().sum()
+        iou = (intersection + 1e-6) / (union + 1e-6)
+        ious.append(iou)
+    
+    return accuracy, torch.tensor(ious).mean()
 
 class CustomSegmentationDataset(Dataset):
     """
@@ -148,8 +239,17 @@ def train_model(
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.CrossEntropyLoss()
+    # optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # criterion = nn.CrossEntropyLoss()
+
+    # Use AdamW optimizer with weight decay
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    
+    # Use combined loss for better handling of class imbalance
+    criterion = CombinedLoss(num_classes=model.classifier[-1].out_channels)
+
+    # Cosine annealing scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     best_loss = float('inf')
     best_model_path = save_dir / "best_deeplabv3_lpt.pth"
@@ -158,21 +258,44 @@ def train_model(
     for epoch in range(num_epochs):
         # Training phase
         model.train()
+        train_metrics = {'loss': 0, 'accuracy': 0, 'iou': 0}
         running_loss = 0.0
-        for images, masks in train_loader:
+        # for images, masks in train_loader:
+        for batch_idx, (images, masks) in enumerate(train_loader):
             images = images.to(device)
             masks = masks.to(device)
 
+            optimizer.zero_grad()
             outputs = model(images)['out']
+
+            # Check prediction distribution periodically
+            if batch_idx % 50 == 0:
+                with torch.no_grad():
+                    pred_classes = outputs.argmax(1)
+                    unique_classes = torch.unique(pred_classes)
+                    print(f"\nBatch {batch_idx} predictions - Unique classes: {unique_classes}")
+                    print(f"Masks - Unique classes: {torch.unique(masks)}")
+
             loss = criterion(outputs, masks)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # Calculate metrics
+            accuracy, iou = calculate_metrics(outputs, masks)
+            train_metrics['loss'] += loss.item()
+            train_metrics['accuracy'] += accuracy.item()
+            train_metrics['iou'] += iou.item()
 
+            loss.backward()
+
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
             running_loss += loss.item()
 
         train_loss = running_loss / len(train_loader)
+        # Normalize metrics
+        for k in train_metrics:
+            train_metrics[k] /= len(train_loader)
 
         # Validation phase
         model.eval()
@@ -185,21 +308,52 @@ def train_model(
                 loss = criterion(outputs, masks)
                 val_loss += loss.item()
 
+                # Monitor predictions
+                pred_classes = outputs.argmax(1)
+                print(f"Val Batch - Unique predicted classes: {torch.unique(pred_classes)}")
+                print(f"Val Batch - Unique mask classes: {torch.unique(masks)}")
+
         val_loss = val_loss / len(val_loader)
 
-        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        # Update scheduler
+        scheduler.step()
 
-        # Save checkpoints
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        print(f"train_metrics : {train_metrics}")
+        print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
+
+        # Save best model
         if val_loss < best_loss:
             best_loss = val_loss
-            torch.save(model.state_dict(), best_model_path)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': best_loss,
+                'num_classes': model.classifier[-1].out_channels
+            }, best_model_path)
             print(f"Saved best model at epoch {epoch+1}")
 
-        torch.save(model.state_dict(), latest_model_path)
+        # save every epoch checkpoint
+        torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': best_loss,
+                'num_classes': model.classifier[-1].out_channels
+            }, latest_model_path)
+        print(f"Saved latest model at epoch {epoch+1}")
 
         if (epoch + 1) % save_interval == 0:
             save_path = save_dir / f"deeplabv3_epoch_{epoch+1}.pth"
-            torch.save(model.state_dict(), save_path)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': best_loss,
+                'num_classes': model.classifier[-1].out_channels
+            }, save_path)
             print(f"Saved checkpoint at epoch {epoch+1}")
 
 def inference(
@@ -274,6 +428,10 @@ def main():
                       help="Save checkpoint every N epochs")
 
     args = parser.parse_args()
+
+    # Validate num_classes
+    if args.num_classes < 2:
+        raise ValueError("num_classes must be at least 2 (1 for background, 1+ for objects)")
 
     # Set device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
