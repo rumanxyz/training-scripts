@@ -335,7 +335,7 @@ def train_model(
             metrics = calculate_metrics(outputs, masks)
             
             print(f"Train Batch {batch_idx} :\nBatch Loss :{loss.item()} \nClass Wise IoU Metrics :")
-            for cls, cls_metrics in val_metrics["class_metrics"].items():
+            for cls, cls_metrics in metrics["class_metrics"].items():
                 print(f"Class {cls}: {cls_metrics}")
 
             train_metrics['loss'] += loss.item()
