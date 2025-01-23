@@ -339,7 +339,7 @@ def train_model(
             #     print(f"Class {cls}: {cls_metrics}")
 
             train_metrics['loss'] += loss.item()
-            train_metrics['accuracy'] += metrics['accuracy']
+            # train_metrics['accuracy'] += metrics['accuracy']
 
             loss.backward()
 
