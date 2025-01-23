@@ -215,7 +215,7 @@ def calculate_metrics(predictions, targets, thresholds=[0.5, 0.6, 0.7, 0.8, 0.9,
 
         # Normalize TP counts by the total number of samples to get percentages
         for threshold in thresholds:
-            metrics["class_metrics"][cls][f"TP@{int(threshold*100)}%"] /= num_samples
+            metrics["class_metrics"][cls][f"IoU@{int(threshold*100)}%"] /= num_samples
 
     return metrics
 
