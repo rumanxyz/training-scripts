@@ -169,7 +169,7 @@ def create_segmentation_mask(image_shape: Tuple[int, int], polygons: List[Dict])
     # return accuracy, torch.tensor(ious).mean()
 
 
-def calculate_metrics(predictions, targets, thresholds=[0.5, 0.6, 0.7, 0.8, 0.9, 0.95]):
+def calculate_metrics(predictions, targets, num_classes, thresholds=[0.5, 0.6, 0.7, 0.8, 0.9, 0.95]):
     """
     Calculate class-wise accuracy and percentage of TPs at different IoU thresholds.
 
@@ -182,7 +182,6 @@ def calculate_metrics(predictions, targets, thresholds=[0.5, 0.6, 0.7, 0.8, 0.9,
         metrics: Dictionary containing class-wise accuracy and percentage of TPs at thresholds
     """
     predictions = predictions.argmax(1)  # (B, H, W)
-    num_classes = predictions.shape[1]  # Number of classes
     num_samples = predictions.shape[0]  # Number of samples in the validation set
 
     # Initialize metrics dictionary
@@ -270,6 +269,7 @@ def train_model(
     device: torch.device,
     save_dir: Union[str, Path],
     learning_rate: float,
+    num_classes: int,
     num_epochs: int = 10,
     save_interval: int = 5
 ) -> None:
@@ -383,7 +383,7 @@ def train_model(
         all_targets = torch.cat(all_targets, dim=0)
 
         # Calculate metrics on full validation set
-        val_metrics = calculate_metrics(all_preds, all_targets)
+        val_metrics = calculate_metrics(all_preds, all_targets, num_classes)
 
         # Print metrics
         print("Train and Validation Summary :")
@@ -536,6 +536,7 @@ def main():
         device=device,
         save_dir=args.chckp_save_directory,
         learning_rate=args.learning_rate,
+        num_classes = args.num_classes,
         num_epochs=args.epochs,
         save_interval=args.weight_save_interval
     )
