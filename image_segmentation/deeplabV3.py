@@ -332,7 +332,7 @@ def train_model(
             running_loss += loss.item()
 
             # Calculate metrics
-            metrics = calculate_metrics(outputs, masks)
+            # metrics = calculate_metrics(outputs, masks, num_classes)
             
             # print(f"Train Batch {batch_idx} :\nBatch Loss :{loss.item()} \nClass Wise IoU Metrics :")
             # for cls, cls_metrics in metrics["class_metrics"].items():
@@ -431,57 +431,6 @@ def train_model(
             }, save_path)
             print(f"Saved checkpoint at epoch {epoch+1}")
 
-def inference(
-    image_path: str,
-    model_path: str,
-    image_size: Tuple[int, int],
-    num_classes: int,
-    model_variant: str = "mobilenet_v3_large"
-) -> List[Dict]:
-    """
-    Perform inference on a single image and return polygon predictions.
-
-    Args:
-        image_path: Path to the input image
-        model_path: Path to the trained model weights
-        image_size: Tuple of (width, height) for input image resizing
-        num_classes: Number of classes (including background)
-        model_variant: DeepLabV3 model variant to use
-
-    Returns:
-        List of dictionaries containing predicted polygons and their class IDs
-    """
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = load_pretrained_deeplabv3(num_classes, model_variant=model_variant)
-    model.load_state_dict(torch.load(model_path))
-    model.eval()
-    model = model.to(device)
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    image = Image.open(image_path).convert('RGB')
-    image = image.resize(image_size)
-    input_tensor = transform(image).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        output = model(input_tensor)['out']
-    prediction = torch.argmax(output.squeeze(), dim=0).detach().cpu().numpy()
-
-    polygons = []
-    for class_id in range(1, num_classes):
-        class_mask = (prediction == class_id).astype(np.uint8)
-        contours, _ = cv2.findContours(class_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours:
-            polygons.append({
-                "class": class_id,
-                "contour": cv2.approxPolyDP(cnt, epsilon=3, closed=True).squeeze().tolist()
-            })
-
-    return polygons
-
 def main():
     parser = argparse.ArgumentParser(description="Train DeepLabV3 model for semantic segmentation")
     parser.add_argument('--train_csv_path', type=str, required=True,
@@ -536,7 +485,7 @@ def main():
         device=device,
         save_dir=args.chckp_save_directory,
         learning_rate=args.learning_rate,
-        num_classes = args.num_classes,
+        num_classes=args.num_classes,
         num_epochs=args.epochs,
         save_interval=args.weight_save_interval
     )
