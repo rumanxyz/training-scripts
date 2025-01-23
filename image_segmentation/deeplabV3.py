@@ -334,9 +334,9 @@ def train_model(
             # Calculate metrics
             metrics = calculate_metrics(outputs, masks)
             
-            print(f"Train Batch {batch_idx} :\nBatch Loss :{loss.item()} \nClass Wise IoU Metrics :")
-            for cls, cls_metrics in metrics["class_metrics"].items():
-                print(f"Class {cls}: {cls_metrics}")
+            # print(f"Train Batch {batch_idx} :\nBatch Loss :{loss.item()} \nClass Wise IoU Metrics :")
+            # for cls, cls_metrics in metrics["class_metrics"].items():
+            #     print(f"Class {cls}: {cls_metrics}")
 
             train_metrics['loss'] += loss.item()
             train_metrics['accuracy'] += metrics['accuracy']
