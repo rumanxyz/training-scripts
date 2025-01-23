@@ -169,7 +169,7 @@ def create_segmentation_mask(image_shape: Tuple[int, int], polygons: List[Dict])
     # return accuracy, torch.tensor(ious).mean()
 
 
-def calculate_metrics(predictions, targets, num_classes, thresholds=[0.5, 0.6, 0.7, 0.8, 0.9, 0.95]):
+def calculate_metrics(predictions, targets, num_classes, thresholds=[0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]):
     """
     Calculate class-wise accuracy and percentage of TPs at different IoU thresholds.
 
