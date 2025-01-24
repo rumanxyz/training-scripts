@@ -152,22 +152,71 @@ def create_segmentation_mask(image_shape: Tuple[int, int], polygons: List[Dict])
     return mask
 
 
-def calculate_metrics(predictions, targets):
-    predictions = predictions.argmax(1)
-    correct = (predictions == targets).float()
-    accuracy = correct.mean()
+# def calculate_metrics(predictions, targets):
+#     predictions = predictions.argmax(1)
+#     correct = (predictions == targets).float()
+#     accuracy = correct.mean()
     
-    # Calculate per-class IoU
-    ious = []
-    for cls in range(predictions.shape[1]):
+#     # Calculate per-class IoU
+#     ious = []
+#     for cls in range(predictions.shape[1]):
+#         pred_cls = predictions == cls
+#         target_cls = targets == cls
+#         intersection = (pred_cls & target_cls).float().sum()
+#         union = (pred_cls | target_cls).float().sum()
+#         iou = (intersection + 1e-6) / (union + 1e-6)
+#         ious.append(iou)
+    # return accuracy, torch.tensor(ious).mean()
+
+
+def calculate_metrics(predictions, targets, num_classes, thresholds=[0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]):
+    """
+    Calculate class-wise accuracy and percentage of TPs at different IoU thresholds.
+
+    Args:
+        predictions: Model predictions (B, C, H, W)
+        targets: Ground truth masks (B, H, W)
+        thresholds: List of IoU thresholds to evaluate
+
+    Returns:
+        metrics: Dictionary containing class-wise accuracy and percentage of TPs at thresholds
+    """
+    predictions = predictions.argmax(1)  # (B, H, W)
+    num_samples = predictions.shape[0]  # Number of samples in the validation set
+
+    # Initialize metrics dictionary
+    metrics = {
+        "accuracy": 0,
+        "class_metrics": {
+            cls: {f"IoU@{int(t*100)}%": 0 for t in thresholds} for cls in range(num_classes)
+        }
+    }
+
+    # Calculate overall accuracy
+    correct = (predictions == targets).float()
+    metrics["accuracy"] = correct.mean().item()
+
+    # Calculate class-wise percentage of TPs at thresholds
+    for cls in range(num_classes):
         pred_cls = predictions == cls
         target_cls = targets == cls
-        intersection = (pred_cls & target_cls).float().sum()
-        union = (pred_cls | target_cls).float().sum()
-        iou = (intersection + 1e-6) / (union + 1e-6)
-        ious.append(iou)
-    
-    return accuracy, torch.tensor(ious).mean()
+
+        # Calculate IoU for each sample in the batch
+        for sample_idx in range(num_samples):
+            intersection = (pred_cls[sample_idx] & target_cls[sample_idx]).float().sum()
+            union = (pred_cls[sample_idx] | target_cls[sample_idx]).float().sum()
+            iou = (intersection + 1e-6) / (union + 1e-6)
+
+            # Check IoU against thresholds for this sample
+            for threshold in thresholds:
+                if iou >= threshold:
+                    metrics["class_metrics"][cls][f"IoU@{int(threshold*100)}%"] += 1
+
+        # Normalize TP counts by the total number of samples to get percentages
+        for threshold in thresholds:
+            metrics["class_metrics"][cls][f"IoU@{int(threshold*100)}%"] /= num_samples
+
+    return metrics
 
 class CustomSegmentationDataset(Dataset):
     """
@@ -220,6 +269,7 @@ def train_model(
     device: torch.device,
     save_dir: Union[str, Path],
     learning_rate: float,
+    num_classes: int,
     num_epochs: int = 10,
     save_interval: int = 5
 ) -> None:
@@ -273,16 +323,23 @@ def train_model(
                 with torch.no_grad():
                     pred_classes = outputs.argmax(1)
                     unique_classes = torch.unique(pred_classes)
-                    print(f"\nBatch {batch_idx} predictions - Unique classes: {unique_classes}")
-                    print(f"Masks - Unique classes: {torch.unique(masks)}")
+                    print(f"\nTrain Batch {batch_idx} predictions - Unique classes: {unique_classes}")
+                    print(f"Train Batch Masks - Unique classes: {torch.unique(masks)}")
 
             loss = criterion(outputs, masks)
 
+
+            running_loss += loss.item()
+
             # Calculate metrics
-            accuracy, iou = calculate_metrics(outputs, masks)
+            # metrics = calculate_metrics(outputs, masks, num_classes)
+            
+            # print(f"Train Batch {batch_idx} :\nBatch Loss :{loss.item()} \nClass Wise IoU Metrics :")
+            # for cls, cls_metrics in metrics["class_metrics"].items():
+            #     print(f"Class {cls}: {cls_metrics}")
+
             train_metrics['loss'] += loss.item()
-            train_metrics['accuracy'] += accuracy.item()
-            train_metrics['iou'] += iou.item()
+            # train_metrics['accuracy'] += metrics['accuracy']
 
             loss.backward()
 
@@ -290,8 +347,7 @@ def train_model(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
-            running_loss += loss.item()
-
+            
         train_loss = running_loss / len(train_loader)
         # Normalize metrics
         for k in train_metrics:
@@ -300,6 +356,9 @@ def train_model(
         # Validation phase
         model.eval()
         val_loss = 0.0
+        all_preds = []
+        all_targets = []
+
         with torch.no_grad():
             for images, masks in val_loader:
                 images = images.to(device)
@@ -308,6 +367,10 @@ def train_model(
                 loss = criterion(outputs, masks)
                 val_loss += loss.item()
 
+                # Accumulate predictions and targets
+                all_preds.append(outputs)
+                all_targets.append(masks)
+
                 # Monitor predictions
                 pred_classes = outputs.argmax(1)
                 print(f"Val Batch - Unique predicted classes: {torch.unique(pred_classes)}")
@@ -315,13 +378,25 @@ def train_model(
 
         val_loss = val_loss / len(val_loader)
 
+        # Concatenate all predictions and targets
+        all_preds = torch.cat(all_preds, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
+
+        # Calculate metrics on full validation set
+        val_metrics = calculate_metrics(all_preds, all_targets, num_classes)
+
+        # Print metrics
+        print("Train and Validation Summary :")
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print(f"Train Loss: {train_metrics['loss']:.4f}, Val Loss: {val_loss:.4f}")
+        # print(f"Train Accuracy: {train_metrics['accuracy']:.4f}, Val Accuracy: {val_metrics['accuracy']:.4f}")
+        print("Val Class-Wise Metrics:")
+        for cls, cls_metrics in val_metrics["class_metrics"].items():
+            print(f"Class {cls}: {cls_metrics}")
+        print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
+
         # Update scheduler
         scheduler.step()
-
-        print(f"Epoch {epoch+1}/{num_epochs}")
-        print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        print(f"train_metrics : {train_metrics}")
-        print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
 
         # Save best model
         if val_loss < best_loss:
@@ -355,57 +430,6 @@ def train_model(
                 'num_classes': model.classifier[-1].out_channels
             }, save_path)
             print(f"Saved checkpoint at epoch {epoch+1}")
-
-def inference(
-    image_path: str,
-    model_path: str,
-    image_size: Tuple[int, int],
-    num_classes: int,
-    model_variant: str = "mobilenet_v3_large"
-) -> List[Dict]:
-    """
-    Perform inference on a single image and return polygon predictions.
-
-    Args:
-        image_path: Path to the input image
-        model_path: Path to the trained model weights
-        image_size: Tuple of (width, height) for input image resizing
-        num_classes: Number of classes (including background)
-        model_variant: DeepLabV3 model variant to use
-
-    Returns:
-        List of dictionaries containing predicted polygons and their class IDs
-    """
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = load_pretrained_deeplabv3(num_classes, model_variant=model_variant)
-    model.load_state_dict(torch.load(model_path))
-    model.eval()
-    model = model.to(device)
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    image = Image.open(image_path).convert('RGB')
-    image = image.resize(image_size)
-    input_tensor = transform(image).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        output = model(input_tensor)['out']
-    prediction = torch.argmax(output.squeeze(), dim=0).detach().cpu().numpy()
-
-    polygons = []
-    for class_id in range(1, num_classes):
-        class_mask = (prediction == class_id).astype(np.uint8)
-        contours, _ = cv2.findContours(class_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours:
-            polygons.append({
-                "class": class_id,
-                "contour": cv2.approxPolyDP(cnt, epsilon=3, closed=True).squeeze().tolist()
-            })
-
-    return polygons
 
 def main():
     parser = argparse.ArgumentParser(description="Train DeepLabV3 model for semantic segmentation")
@@ -461,6 +485,7 @@ def main():
         device=device,
         save_dir=args.chckp_save_directory,
         learning_rate=args.learning_rate,
+        num_classes=args.num_classes,
         num_epochs=args.epochs,
         save_interval=args.weight_save_interval
     )
