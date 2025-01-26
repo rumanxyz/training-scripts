@@ -16,6 +16,7 @@ from PIL import Image
 import argparse
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union
+from torch.cuda.amp import autocast, GradScaler
 
 # Hugging Face Imports
 from transformers import Mask2FormerForUniversalSegmentation, Mask2FormerConfig
@@ -81,6 +82,7 @@ def load_pretrained_mask2former(num_classes: int) -> nn.Module:
     """Load Mask2Former model with proper configuration"""
     config = Mask2FormerConfig.from_pretrained("facebook/mask2former-swin-tiny-coco-instance")
     config.num_labels = num_classes
+    config.use_recompute = True  # Enable gradient checkpointing
     return Mask2FormerForUniversalSegmentation.from_pretrained(
         "facebook/mask2former-swin-small-coco-instance",
         config=config,
@@ -134,71 +136,84 @@ def train_model(
     num_epochs: int = 10,
     save_interval: int = 5
 ) -> None:
-    """Training loop adapted for Mask2Former's output structure"""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    scaler = GradScaler()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     
     best_iou = 0.0
     best_model_path = save_dir / "best_mask2former.pth"
-    
+
     for epoch in range(num_epochs):
-        # Training
+        # --- Training Phase ---
         model.train()
         train_loss = 0.0
+        
         for images, masks in train_loader:
             images, masks = images.to(device), masks.to(device)
             
             optimizer.zero_grad()
-            outputs = model(pixel_values=images, mask_labels=masks)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
+            
+            with autocast():
+                outputs = model(pixel_values=images, mask_labels=masks)
+                loss = outputs.loss
+            
+            scaler.scale(loss).backward() # add gradient acc in next iteration for efficent training
+            scaler.step(optimizer)
+            scaler.update()
             
             train_loss += loss.item()
-        
-        # Validation
+
+        # --- Validation Phase ---
         model.eval()
         val_loss = 0.0
-        all_preds = []
-        all_targets = []
+        total_samples = 0
+        val_metrics = {"class_metrics": defaultdict(lambda: {"iou": 0.0})}
         
         with torch.no_grad():
             for images, masks in val_loader:
                 images, masks = images.to(device), masks.to(device)
-                outputs = model(pixel_values=images, mask_labels=masks)
-                val_loss += outputs.loss.item()
                 
-                # Store for metric calculation
-                all_preds.append(outputs)
-                all_targets.append(masks)
+                with autocast():  # Mixed precision for validation
+                    outputs = model(pixel_values=images, mask_labels=masks)
+                
+                val_loss += outputs.loss.item()
+                batch_metrics = calculate_metrics(outputs, masks, num_classes)
+                batch_size = masks.shape[0]
+                total_samples += batch_size
+                
+                # Aggregate class metrics
+                for cls in range(num_classes):
+                    val_metrics["class_metrics"][cls]["iou"] += \
+                        batch_metrics["class_metrics"][cls]["iou"] * batch_size
+
+        # Normalize validation metrics
+        for cls in val_metrics["class_metrics"]:
+            val_metrics["class_metrics"][cls]["iou"] /= total_samples
         
-        # Calculate metrics
-        val_preds = type(outputs)(*map(torch.cat, zip(*all_preds)))
-        val_targets = torch.cat(all_targets)
-        val_metrics = calculate_metrics(val_preds, val_targets, num_classes)
-        
-        # Save best model
         current_iou = np.mean([v["iou"] for v in val_metrics["class_metrics"].values()])
+        
+        # --- Checkpoint Saving ---
         if current_iou > best_iou:
             best_iou = current_iou
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
                 'num_classes': num_classes
             }, best_model_path)
-        
-        # Print progress
-        print(f"Epoch {epoch+1}/{num_epochs}")
+
+        # --- Progress Reporting ---
+        print(f"\nEpoch {epoch+1}/{num_epochs}")
         print(f"Train Loss: {train_loss/len(train_loader):.4f}")
         print(f"Val Loss: {val_loss/len(val_loader):.4f}")
         print(f"Mean IoU: {current_iou:.4f}")
         print("Class-wise IoUs:")
-        for cls, metrics in val_metrics["class_metrics"].items():
-            print(f"Class {cls}: {metrics['iou']:.4f}")
+        for cls in sorted(val_metrics["class_metrics"].keys()):
+            print(f"Class {cls}: {val_metrics['class_metrics'][cls]['iou']:.4f}")
         
         scheduler.step()
 
@@ -256,14 +271,18 @@ def main():
         batch_size=args.train_batch_size,
         shuffle=True,
         num_workers=4,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True,
+        drop_last=True
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.val_batch_size,
         shuffle=False,
         num_workers=4,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True,
+        drop_last=True
     )
     
     # Initialize model
