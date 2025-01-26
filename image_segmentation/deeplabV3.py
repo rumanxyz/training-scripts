@@ -289,9 +289,6 @@ def train_model(
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    # criterion = nn.CrossEntropyLoss()
-
     # Use AdamW optimizer with weight decay
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     
