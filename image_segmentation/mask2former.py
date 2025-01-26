@@ -79,7 +79,7 @@ class CustomSegmentationDataset(Dataset):
 
 def load_pretrained_mask2former(num_classes: int) -> nn.Module:
     """Load Mask2Former model with proper configuration"""
-    config = Mask2FormerConfig.from_pretrained("facebook/mask2former-swin-small-coco-instance")
+    config = Mask2FormerConfig.from_pretrained("facebook/mask2former-swin-tiny-coco-instance")
     config.num_labels = num_classes
     return Mask2FormerForUniversalSegmentation.from_pretrained(
         "facebook/mask2former-swin-small-coco-instance",
